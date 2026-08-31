@@ -4,37 +4,11 @@
    • multi-language syntax (python/json/js/html/css/md/...)
    • async autocomplete via Jedi (pyodide) + keywords fallback
    • Error-Lens style inline diagnostics + squiggles + gutter
-   Defines window.IDEEditor and fires "ide-editor-ready".
+   Defines window.IDEEditor and fires "ide-editor-ready" once the
+   CodeMirror modules have loaded from the CDN.
    ============================================================ */
 (function () {
   'use strict';
-
-  let EditorState, EditorView, Compartment, StateField, StateEffect, Decoration, WidgetType;
-  let commands, language, autocomplete, lint, search;
-
-  async function loadCM() {
-    const cm = await Promise.all([
-      import('https://esm.sh/@codemirror/state@6'),
-      import('https://esm.sh/@codemirror/view@6'),
-      import('https://esm.sh/@codemirror/commands@6'),
-      import('https://esm.sh/@codemirror/language@6'),
-      import('https://esm.sh/@codemirror/autocomplete@6'),
-      import('https://esm.sh/@codemirror/lint@6'),
-      import('https://esm.sh/@codemirror/search@6'),
-    ]);
-    EditorState = cm[0];
-    EditorView = cm[1].EditorView;
-    Compartment = cm[0].Compartment;
-    StateField = cm[0].StateField;
-    StateEffect = cm[0].StateEffect;
-    Decoration = cm[1].Decoration;
-    WidgetType = cm[1].WidgetType;
-    commands = cm[2];
-    language = cm[3];
-    autocomplete = cm[4];
-    lint = cm[5];
-    search = cm[6];
-  }
 
   /* ---------- Python keyword / builtin fallback completions ---------- */
   const PY_WORDS = `
@@ -59,374 +33,391 @@ str sum super tuple type vars zip __name__ __file__
     'function annotation': 'function',
   };
 
-  let lensField, setLens;
-
-  /* ---------- Error-Lens inline widget ---------- */
-  class LensWidget extends WidgetType {
-    constructor(text, cls) { super(); this.text = text; this.cls = cls; }
-    toDOM() {
-      const s = document.createElement('span');
-      s.className = 'error-lens ' + this.cls;
-      s.textContent = this.text;
-      return s;
-    }
-    ignoreEvent() { return true; }
-  }
-
-  function buildLens(state, diags) {
-    const byLine = new Map();
-    for (const d of diags) {
-      if (d.from >= state.doc.length) continue;
-      const line = state.doc.lineAt(Math.max(0, d.from));
-      if (!byLine.has(line.number)) byLine.set(line.number, []);
-      byLine.get(line.number).push(d);
-    }
-    const decos = [];
-    for (const [ln, ds] of byLine) {
-      const line = state.doc.line(ln);
-      const pos = Math.min(line.to, state.doc.length);
-      const msg = ds.map((d) => d.message).join('   \u00b7   ');
-      const cls = ds.some((d) => d.severity === 'error') ? 'err' : 'warn';
-      decos.push(Decoration.widget({ widget: new LensWidget(msg, cls), side: -1 }).range(pos));
-    }
-    decos.sort((a, b) => a.from - b.from);
-    return Decoration.set(decos);
-  }
-
-  /* ---------- lint / Error Lens source ---------- */
-  function pyLintSource(view) {
-    const node = currentNode;
-    if (!node || !node.name.toLowerCase().endsWith('.py')) return Promise.resolve([]);
-    if (!window.Runner || !window.Runner.isReady() || window.Runner.isBusy()) return Promise.resolve([]);
-    const code = view.state.doc.toString();
-    const path = '/home/pyodide/project/' + window.Files.pathOf(node);
-    return window.Runner.lint(code, path).then((raw) => {
-      raw = raw || [];
-      const diags = raw.map((d) => {
-        const [sev, lineno, col, msg] = d;
-        const lines = view.state.doc.lines;
-        const ln = Math.min(Math.max(1, lineno), lines);
-        const line = view.state.doc.line(ln);
-        const from = line.from + Math.min(Math.max(0, col), Math.max(0, line.text.length));
-        let to;
-        if (col <= 0) {
-          to = line.to;
-        } else {
-          const mm = line.text.slice(col).match(/^(\w+)/);
-          to = Math.min(from + (mm ? mm[1].length : 1), line.to);
-        }
-        return {
-          from, to,
-          severity: sev === 'error' ? 'error' : 'warning',
-          message: String(msg),
-          source: 'pyflakes',
-        };
-      });
-      if (currentNode === node) {
-        try { view.dispatch({ effects: setLens.of(diags) }); } catch (e) {}
-      }
-      return diags;
-    }).catch(() => []);
-  }
-
-  /* ---------- completion sources ---------- */
+  // shared editor state (no CodeMirror dependency)
   let currentNode = null;
 
-  function pythonSource(ctx) {
-    const word = ctx.matchBefore(/[\w.]*/);
-    if (!word || (word.from === word.to && !ctx.explicit)) return null;
-    const node = currentNode;
-    const code = ctx.state.doc.toString();
-    const pos = ctx.state.selection.main.head;
-    const line = ctx.state.doc.lineAt(pos);
-    const rel = node ? window.Files.pathOf(node) : 'main.py';
-    const fpath = '/home/pyodide/project/' + rel;
-    const li = line.number;
-    const col = pos - line.from;
+  async function loadCM() {
+    return Promise.all([
+      import('https://esm.sh/@codemirror/state@6'),
+      import('https://esm.sh/@codemirror/view@6'),
+      import('https://esm.sh/@codemirror/commands@6'),
+      import('https://esm.sh/@codemirror/language@6'),
+      import('https://esm.sh/@codemirror/autocomplete@6'),
+      import('https://esm.sh/@codemirror/lint@6'),
+      import('https://esm.sh/@codemirror/search@6'),
+    ]);
+  }
 
-    const fallback = { from: word.from, options: KEYWORD_OPTS, validFor: /^[\w.]*$/ };
+  async function build() {
+    const [
+      modState, modView, modCommands, modLanguage, modAutocomplete, modLint, modSearch,
+    ] = await loadCM();
 
-    if (!window.Runner || !window.Runner.isReady() || window.Runner.isBusy()) return fallback;
+    // Correct module destructuring (these are module exports, NOT class statics).
+    const { EditorState, Compartment, StateField, StateEffect } = modState;
+    const {
+      EditorView, Decoration, WidgetType, keymap, lineNumbers,
+      highlightActiveLine, highlightActiveLineGutter, drawSelection,
+      highlightSpecialChars, rectangularSelection, placeholder,
+    } = modView;
+    const { defaultKeymap, history, historyKeymap, indentWithTab } = modCommands;
+    const {
+      defaultHighlightStyle, syntaxHighlighting, indentOnInput,
+      bracketMatching, closeBrackets, closeBracketsKeymap, foldGutter, StreamLanguage,
+    } = modLanguage;
+    const { autocompletion, completionKeymap, startCompletion, acceptCompletion } = modAutocomplete;
+    const { lintGutter, linter, forceLinting } = modLint;
+    const { search: searchExt, searchKeymap } = modSearch;
 
-    return window.Runner.complete(code, fpath, li, col).then((comps) => {
-      let opts = (comps || []).map((c) => ({
-        label: c[0],
-        type: JEDI_TYPES[c[1]] || 'variable',
-        detail: c[2] && c[2] !== c[0] ? c[2] : undefined,
-        info: c[3] || undefined,
-      }));
-      const have = new Set(opts.map((o) => o.label));
-      for (const k of KEYWORD_OPTS) {
-        if (!have.has(k.label) && k.label.startsWith('_') === false) opts.push(k);
+    /* ---------- Error-Lens inline widget ---------- */
+    class LensWidget extends WidgetType {
+      constructor(text, cls) { super(); this.text = text; this.cls = cls; }
+      toDOM() {
+        const s = document.createElement('span');
+        s.className = 'error-lens ' + this.cls;
+        s.textContent = this.text;
+        return s;
       }
-      if (!opts.length) opts = KEYWORD_OPTS;
-      return { from: word.from, options: opts, validFor: /^[\w.]*$/ };
-    }).catch(() => fallback);
-  }
-
-  function documentWords(ctx) {
-    const word = ctx.matchBefore(/[\w-]+/);
-    if (!word || (word.from === word.to && !ctx.explicit)) return null;
-    const text = ctx.state.doc.toString();
-    const seen = new Map();
-    const re = /[A-Za-z_][\w-]*/g;
-    let m;
-    while ((m = re.exec(text))) seen.set(m[0], (seen.get(m[0]) || 0) + 1);
-    const options = [...seen.entries()]
-      .map(([label, boost]) => ({ label, type: 'variable', boost }))
-      .filter((o) => o.label !== word.text);
-    return { from: word.from, options, validFor: /^[\w-]*$/ };
-  }
-
-  function completionSource(ctx) {
-    const node = currentNode;
-    const isPy = node && node.name.split('.').pop().toLowerCase() === 'py';
-    return isPy ? pythonSource(ctx) : documentWords(ctx);
-  }
-
-  /* ---------- theme ---------- */
-  const darkThemeSpec = {
-    '&': { color: '#e6e7ea', backgroundColor: '#17181d', height: '100%' },
-    '.cm-content': { caretColor: '#4f8cff', padding: '8px 0 40px 0' },
-    '.cm-line': { padding: '0 10px' },
-    '.cm-gutters': {
-      backgroundColor: '#17181d', color: '#6b707d', border: 'none',
-      borderRight: '1px solid #34363f',
-    },
-    '.cm-activeLine': { backgroundColor: 'rgba(255,255,255,0.035)' },
-    '.cm-activeLineGutter': { backgroundColor: 'rgba(255,255,255,0.06)', color: '#9aa0ad' },
-    '.cm-cursor': { borderLeftColor: '#4f8cff', borderLeftWidth: '2px' },
-    '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection':
-      { backgroundColor: 'rgba(79,140,255,0.25) !important' },
-    '.cm-selectionMatch': { backgroundColor: 'rgba(79,140,255,0.18)' },
-    '.cm-matchingBracket': { backgroundColor: 'rgba(79,140,255,0.25)', outline: '1px solid rgba(79,140,255,0.4)' },
-    '.cm-foldPlaceholder': { backgroundColor: '#2e303a', border: '1px solid #34363f', color: '#9aa0ad' },
-  };
-
-  /* ---------- language loading ---------- */
-  const langCache = new Map();
-  async function langFor(name) {
-    const ext = (name.split('.').pop() || '').toLowerCase();
-    if (langCache.has(ext)) return langCache.get(ext);
-    let ext2 = null;
-    const { StreamLanguage } = language;
-    try {
-      switch (ext) {
-        case 'py': case 'pyw': {
-          const m = await import('https://esm.sh/@codemirror/lang-python@6');
-          ext2 = m.python();
-          break;
-        }
-        case 'json': {
-          const m = await import('https://esm.sh/@codemirror/lang-json@6');
-          ext2 = m.json();
-          break;
-        }
-        case 'js': case 'mjs': case 'cjs': case 'jsx': {
-          const m = await import('https://esm.sh/@codemirror/legacy-modes@6/mode/javascript');
-          ext2 = StreamLanguage.define(m.javascript({}));
-          break;
-        }
-        case 'ts': case 'tsx': {
-          const m = await import('https://esm.sh/@codemirror/legacy-modes@6/mode/javascript');
-          ext2 = StreamLanguage.define(m.javascript({ typescript: true }));
-          break;
-        }
-        case 'css': {
-          const m = await import('https://esm.sh/@codemirror/legacy-modes@6/mode/css');
-          ext2 = StreamLanguage.define(m.css);
-          break;
-        }
-        case 'html': case 'htm': case 'vue': case 'xml': case 'svg': {
-          const m = await import('https://esm.sh/@codemirror/legacy-modes@6/mode/xml');
-          ext2 = StreamLanguage.define(m.xml({}));
-          break;
-        }
-        case 'md': case 'markdown': {
-          const m = await import('https://esm.sh/@codemirror/legacy-modes@6/mode/markdown');
-          ext2 = StreamLanguage.define(m.markdown({}));
-          break;
-        }
-        case 'sh': case 'bash': {
-          const m = await import('https://esm.sh/@codemirror/legacy-modes@6/mode/shell');
-          ext2 = StreamLanguage.define(m.shell);
-          break;
-        }
-        case 'sql': {
-          const m = await import('https://esm.sh/@codemirror/legacy-modes@6/mode/sql');
-          ext2 = StreamLanguage.define(m.sql({}));
-          break;
-        }
-        default:
-          ext2 = [];
-      }
-    } catch (e) {
-      console.warn('language load failed', ext, e);
-      ext2 = [];
+      ignoreEvent() { return true; }
     }
-    langCache.set(ext, ext2);
-    return ext2;
-  }
 
-  /* ---------- editor class ---------- */
-  class IDEEditor {
-    constructor(mount) {
-      this.mount = mount;
-      this.langComp = new Compartment();
-      const self = this;
-      const {
-        keymap, lineNumbers, highlightActiveLine, highlightActiveLineGutter,
-        drawSelection, highlightSpecialChars, rectangularSelection, placeholder,
-      } = EditorView;
-      const {
-        defaultKeymap, history, historyKeymap, indentWithTab,
-      } = commands;
-      const {
-        defaultHighlightStyle, syntaxHighlighting, indentOnInput,
-        bracketMatching, closeBrackets, closeBracketsKeymap, foldGutter,
-      } = language;
-      const { autocompletion, completionKeymap, startCompletion, acceptCompletion } = autocomplete;
-      const { lintGutter, linter, forceLinting } = lint;
+    const setLens = StateEffect.define();
+    const lensField = StateField.define({
+      create() { return Decoration.none; },
+      update(deco, tr) {
+        deco = deco.map(tr.changes);
+        for (const e of tr.effects) {
+          if (e.is(setLens)) deco = buildLens(tr.state, e.value);
+        }
+        return deco;
+      },
+      provide: (f) => EditorView.decorations.from(f),
+    });
 
-      lensField = StateField.define({
-        create() { return Decoration.none; },
-        update(deco, tr) {
-          deco = deco.map(tr.changes);
-          for (const e of tr.effects) {
-            if (e.is(setLens)) deco = buildLens(tr.state, e.value);
+    function buildLens(state, diags) {
+      const byLine = new Map();
+      for (const d of diags) {
+        if (d.from >= state.doc.length) continue;
+        const line = state.doc.lineAt(Math.max(0, d.from));
+        if (!byLine.has(line.number)) byLine.set(line.number, []);
+        byLine.get(line.number).push(d);
+      }
+      const decos = [];
+      for (const [ln, ds] of byLine) {
+        const line = state.doc.line(ln);
+        const pos = Math.min(line.to, state.doc.length);
+        const msg = ds.map((d) => d.message).join('   \u00b7   ');
+        const cls = ds.some((d) => d.severity === 'error') ? 'err' : 'warn';
+        decos.push(Decoration.widget({ widget: new LensWidget(msg, cls), side: -1 }).range(pos));
+      }
+      decos.sort((a, b) => a.from - b.from);
+      return Decoration.set(decos);
+    }
+
+    /* ---------- lint / Error Lens source ---------- */
+    function pyLintSource(view) {
+      const node = currentNode;
+      if (!node || !node.name.toLowerCase().endsWith('.py')) return Promise.resolve([]);
+      if (!window.Runner || !window.Runner.isReady() || window.Runner.isBusy()) return Promise.resolve([]);
+      const code = view.state.doc.toString();
+      const path = '/home/pyodide/project/' + window.Files.pathOf(node);
+      return window.Runner.lint(code, path).then((raw) => {
+        raw = raw || [];
+        const diags = raw.map((d) => {
+          const [sev, lineno, col, msg] = d;
+          const lines = view.state.doc.lines;
+          const ln = Math.min(Math.max(1, lineno), lines);
+          const line = view.state.doc.line(ln);
+          const from = line.from + Math.min(Math.max(0, col), Math.max(0, line.text.length));
+          let to;
+          if (col <= 0) {
+            to = line.to;
+          } else {
+            const mm = line.text.slice(col).match(/^(\w+)/);
+            to = Math.min(from + (mm ? mm[1].length : 1), line.to);
           }
-          return deco;
-        },
-        provide: (f) => EditorView.decorations.from(f),
-      });
-      setLens = StateEffect.define();
+          return {
+            from, to,
+            severity: sev === 'error' ? 'error' : 'warning',
+            message: String(msg),
+            source: 'pyflakes',
+          };
+        });
+        if (currentNode === node) {
+          try { view.dispatch({ effects: setLens.of(diags) }); } catch (e) {}
+        }
+        return diags;
+      }).catch(() => []);
+    }
 
-      const dotTrigger = EditorView.domEventHandlers({
-        keydown(event, view) {
-          if (event.key === '.') {
-            setTimeout(() => { try { startCompletion(view); } catch (e) {} }, 30);
+    /* ---------- completion sources ---------- */
+    function pythonSource(ctx) {
+      const word = ctx.matchBefore(/[\w.]*/);
+      if (!word || (word.from === word.to && !ctx.explicit)) return null;
+      const node = currentNode;
+      const code = ctx.state.doc.toString();
+      const pos = ctx.state.selection.main.head;
+      const line = ctx.state.doc.lineAt(pos);
+      const rel = node ? window.Files.pathOf(node) : 'main.py';
+      const fpath = '/home/pyodide/project/' + rel;
+      const li = line.number;
+      const col = pos - line.from;
+
+      const fallback = { from: word.from, options: KEYWORD_OPTS, validFor: /^[\w.]*$/ };
+
+      if (!window.Runner || !window.Runner.isReady() || window.Runner.isBusy()) return fallback;
+
+      return window.Runner.complete(code, fpath, li, col).then((comps) => {
+        let opts = (comps || []).map((c) => ({
+          label: c[0],
+          type: JEDI_TYPES[c[1]] || 'variable',
+          detail: c[2] && c[2] !== c[0] ? c[2] : undefined,
+          info: c[3] || undefined,
+        }));
+        const have = new Set(opts.map((o) => o.label));
+        for (const k of KEYWORD_OPTS) {
+          if (!have.has(k.label) && k.label.startsWith('_') === false) opts.push(k);
+        }
+        if (!opts.length) opts = KEYWORD_OPTS;
+        return { from: word.from, options: opts, validFor: /^[\w.]*$/ };
+      }).catch(() => fallback);
+    }
+
+    function documentWords(ctx) {
+      const word = ctx.matchBefore(/[\w-]+/);
+      if (!word || (word.from === word.to && !ctx.explicit)) return null;
+      const text = ctx.state.doc.toString();
+      const seen = new Map();
+      const re = /[A-Za-z_][\w-]*/g;
+      let m;
+      while ((m = re.exec(text))) seen.set(m[0], (seen.get(m[0]) || 0) + 1);
+      const options = [...seen.entries()]
+        .map(([label, boost]) => ({ label, type: 'variable', boost }))
+        .filter((o) => o.label !== word.text);
+      return { from: word.from, options, validFor: /^[\w-]*$/ };
+    }
+
+    function completionSource(ctx) {
+      const node = currentNode;
+      const isPy = node && node.name.split('.').pop().toLowerCase() === 'py';
+      return isPy ? pythonSource(ctx) : documentWords(ctx);
+    }
+
+    const dotTrigger = EditorView.domEventHandlers({
+      keydown(event, view) {
+        if (event.key === '.') {
+          setTimeout(() => { try { startCompletion(view); } catch (e) {} }, 30);
+        }
+        return false;
+      },
+    });
+
+    /* ---------- theme ---------- */
+    const darkThemeSpec = {
+      '&': { color: '#e6e7ea', backgroundColor: '#17181d', height: '100%' },
+      '.cm-content': { caretColor: '#4f8cff', padding: '8px 0 40px 0' },
+      '.cm-line': { padding: '0 10px' },
+      '.cm-gutters': {
+        backgroundColor: '#17181d', color: '#6b707d', border: 'none',
+        borderRight: '1px solid #34363f',
+      },
+      '.cm-activeLine': { backgroundColor: 'rgba(255,255,255,0.035)' },
+      '.cm-activeLineGutter': { backgroundColor: 'rgba(255,255,255,0.06)', color: '#9aa0ad' },
+      '.cm-cursor': { borderLeftColor: '#4f8cff', borderLeftWidth: '2px' },
+      '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection':
+        { backgroundColor: 'rgba(79,140,255,0.25) !important' },
+      '.cm-selectionMatch': { backgroundColor: 'rgba(79,140,255,0.18)' },
+      '.cm-matchingBracket': { backgroundColor: 'rgba(79,140,255,0.25)', outline: '1px solid rgba(79,140,255,0.4)' },
+      '.cm-foldPlaceholder': { backgroundColor: '#2e303a', border: '1px solid #34363f', color: '#9aa0ad' },
+    };
+
+    /* ---------- language loading ---------- */
+    const langCache = new Map();
+    async function langFor(name) {
+      const ext = (name.split('.').pop() || '').toLowerCase();
+      if (langCache.has(ext)) return langCache.get(ext);
+      let langExt = null;
+      try {
+        switch (ext) {
+          case 'py': case 'pyw': {
+            const m = await import('https://esm.sh/@codemirror/lang-python@6');
+            langExt = m.python();
+            break;
           }
-          return false;
-        },
-      });
-
-      this.view = new EditorView({
-        parent: mount,
-        state: EditorState.create({
-          doc: '',
-          extensions: [
-            lineNumbers(),
-            highlightSpecialChars(),
-            history(),
-            foldGutter(),
-            drawSelection(),
-            EditorState.allowMultipleSelections.of(true),
-            indentOnInput(),
-            bracketMatching(),
-            closeBrackets(),
-            autocompletion({
-              override: [completionSource],
-              activateOnTyping: true,
-              icons: true,
-              tooltipClass: () => 'cm-ac-tooltip',
-            }),
-            dotTrigger,
-            lintGutter(),
-            linter(pyLintSource, { delay: 550, tooltips: true }),
-            highlightActiveLine(),
-            highlightActiveLineGutter(),
-            rectangularSelection(),
-            search.search({ top: true }),
-            syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-            EditorView.theme(darkThemeSpec, { dark: true }),
-            lensField,
-            placeholder('Open or create a file from the explorer (📄+)…'),
-            this.langComp.of([]),
-            keymap.of([
-              // Note: Mod-Enter is handled globally in app.js (avoids double-runs)
-              { key: 'Mod-s', run: () => { window.Files && window.Files.save(); return true; } },
-              { key: 'Tab', run: acceptCompletion },
-              ...closeBracketsKeymap,
-              ...defaultKeymap,
-              ...search.searchKeymap,
-              ...historyKeymap,
-              ...completionKeymap,
-              indentWithTab,
-            ]),
-            EditorView.updateListener.of((u) => {
-              if (u.docChanged && self.onChange) self.onChange(self.view.state.doc.toString());
-              if (u.selectionSet && self.onCursor) {
-                const pos = u.state.selection.main.head;
-                const line = u.state.doc.lineAt(pos);
-                self.onCursor(line.number, pos - line.from + 1);
-              }
-            }),
-          ],
-        }),
-      });
-    }
-
-    open(node) {
-      currentNode = node;
-      const doc = node.content || '';
-      this.view.dispatch({
-        changes: { from: 0, to: this.view.state.doc.length, insert: doc },
-        effects: this.langComp.reconfigure([]),
-      });
-      this.clearLens();
-      langFor(node.name).then((lang) => {
-        if (currentNode !== node) return;
-        this.view.dispatch({ effects: this.langComp.reconfigure(lang) });
-        try { lint.forceLinting(this.view); } catch (e) {}
-      });
-      try { lint.forceLinting(this.view); } catch (e) {}
-      this.view.focus();
-    }
-
-    get content() { return this.view.state.doc.toString(); }
-
-    forceLint() { try { lint.forceLinting(this.view); } catch (e) {} }
-
-    clearLens() { this.view.dispatch({ effects: setLens.of([]) }); }
-
-    focus() { try { this.view.focus(); } catch (e) {} }
-
-    insertText(text, moveBack = 0) {
-      const view = this.view;
-      const changes = [];
-      const sel = view.state.selection;
-      for (const r of sel.ranges) changes.push({ from: r.from, to: r.to, insert: text });
-      if (!changes.length) changes.push({ from: view.state.doc.length, insert: text });
-      view.dispatch({
-        changes,
-        selection: sel.ranges.map((r) => {
-          const end = r.from + text.length;
-          const p = Math.max(r.from, end - moveBack);
-          return { anchor: p, head: p };
-        }),
-        scrollIntoView: true,
-      });
-      view.focus();
-    }
-
-    dedent() {
-      const view = this.view;
-      const { from } = view.state.selection.main;
-      const line = view.state.doc.lineAt(from);
-      const extra = Math.min(4, line.text.length - line.text.trimStart().length);
-      if (extra > 0) {
-        view.dispatch({ changes: { from: line.from, to: line.from + extra, insert: '' } });
+          case 'json': {
+            const m = await import('https://esm.sh/@codemirror/lang-json@6');
+            langExt = m.json();
+            break;
+          }
+          case 'js': case 'mjs': case 'cjs': case 'jsx': {
+            const m = await import('https://esm.sh/@codemirror/legacy-modes@6/mode/javascript');
+            langExt = StreamLanguage.define(m.javascript({}));
+            break;
+          }
+          case 'ts': case 'tsx': {
+            const m = await import('https://esm.sh/@codemirror/legacy-modes@6/mode/javascript');
+            langExt = StreamLanguage.define(m.javascript({ typescript: true }));
+            break;
+          }
+          case 'css': {
+            const m = await import('https://esm.sh/@codemirror/legacy-modes@6/mode/css');
+            langExt = StreamLanguage.define(m.css);
+            break;
+          }
+          case 'html': case 'htm': case 'vue': case 'xml': case 'svg': {
+            const m = await import('https://esm.sh/@codemirror/legacy-modes@6/mode/xml');
+            langExt = StreamLanguage.define(m.xml({}));
+            break;
+          }
+          case 'md': case 'markdown': {
+            const m = await import('https://esm.sh/@codemirror/legacy-modes@6/mode/markdown');
+            langExt = StreamLanguage.define(m.markdown({}));
+            break;
+          }
+          case 'sh': case 'bash': {
+            const m = await import('https://esm.sh/@codemirror/legacy-modes@6/mode/shell');
+            langExt = StreamLanguage.define(m.shell);
+            break;
+          }
+          case 'sql': {
+            const m = await import('https://esm.sh/@codemirror/legacy-modes@6/mode/sql');
+            langExt = StreamLanguage.define(m.sql({}));
+            break;
+          }
+          default:
+            langExt = [];
+        }
+      } catch (e) {
+        console.warn('language load failed', ext, e);
+        langExt = [];
       }
-      view.focus();
+      langCache.set(ext, langExt);
+      return langExt;
     }
-  }
 
-  window.IDEEditor = IDEEditor;
+    /* ---------- editor class ---------- */
+    class IDEEditor {
+      constructor(mount) {
+        this.mount = mount;
+        this.langComp = new Compartment();
+        const self = this;
 
-  /* Boot: load CodeMirror from CDN, then hand control to app.js */
-  loadCM().then(() => {
+        this.view = new EditorView({
+          parent: mount,
+          state: EditorState.create({
+            doc: '',
+            extensions: [
+              lineNumbers(),
+              highlightSpecialChars(),
+              history(),
+              foldGutter(),
+              drawSelection(),
+              EditorState.allowMultipleSelections.of(true),
+              indentOnInput(),
+              bracketMatching(),
+              closeBrackets(),
+              autocompletion({
+                override: [completionSource],
+                activateOnTyping: true,
+                icons: true,
+                tooltipClass: () => 'cm-ac-tooltip',
+              }),
+              dotTrigger,
+              lintGutter(),
+              linter(pyLintSource, { delay: 550, tooltips: true }),
+              highlightActiveLine(),
+              highlightActiveLineGutter(),
+              rectangularSelection(),
+              searchExt({ top: true }),
+              syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+              EditorView.theme(darkThemeSpec, { dark: true }),
+              lensField,
+              placeholder('Open or create a file from the explorer (📄+)…'),
+              this.langComp.of([]),
+              keymap.of([
+                // Note: Mod-Enter is handled globally in app.js (avoids double-runs)
+                { key: 'Mod-s', run: () => { window.Files && window.Files.save(); return true; } },
+                { key: 'Tab', run: acceptCompletion },
+                ...closeBracketsKeymap,
+                ...defaultKeymap,
+                ...searchKeymap,
+                ...historyKeymap,
+                ...completionKeymap,
+                indentWithTab,
+              ]),
+              EditorView.updateListener.of((u) => {
+                if (u.docChanged && self.onChange) self.onChange(self.view.state.doc.toString());
+                if (u.selectionSet && self.onCursor) {
+                  const pos = u.state.selection.main.head;
+                  const line = u.state.doc.lineAt(pos);
+                  self.onCursor(line.number, pos - line.from + 1);
+                }
+              }),
+            ],
+          }),
+        });
+      }
+
+      open(node) {
+        currentNode = node;
+        const doc = node.content || '';
+        this.view.dispatch({
+          changes: { from: 0, to: this.view.state.doc.length, insert: doc },
+          effects: this.langComp.reconfigure([]),
+        });
+        this.clearLens();
+        langFor(node.name).then((langExt) => {
+          if (currentNode !== node) return;
+          this.view.dispatch({ effects: this.langComp.reconfigure(langExt) });
+          try { forceLinting(this.view); } catch (e) {}
+        });
+        try { forceLinting(this.view); } catch (e) {}
+        this.view.focus();
+      }
+
+      get content() { return this.view.state.doc.toString(); }
+
+      forceLint() { try { forceLinting(this.view); } catch (e) {} }
+
+      clearLens() { this.view.dispatch({ effects: setLens.of([]) }); }
+
+      focus() { try { this.view.focus(); } catch (e) {} }
+
+      insertText(text, moveBack = 0) {
+        const view = this.view;
+        const changes = [];
+        const sel = view.state.selection;
+        for (const r of sel.ranges) changes.push({ from: r.from, to: r.to, insert: text });
+        if (!changes.length) changes.push({ from: view.state.doc.length, insert: text });
+        view.dispatch({
+          changes,
+          selection: sel.ranges.map((r) => {
+            const end = r.from + text.length;
+            const p = Math.max(r.from, end - moveBack);
+            return { anchor: p, head: p };
+          }),
+          scrollIntoView: true,
+        });
+        view.focus();
+      }
+
+      dedent() {
+        const view = this.view;
+        const { from } = view.state.selection.main;
+        const line = view.state.doc.lineAt(from);
+        const extra = Math.min(4, line.text.length - line.text.trimStart().length);
+        if (extra > 0) {
+          view.dispatch({ changes: { from: line.from, to: line.from + extra, insert: '' } });
+        }
+        view.focus();
+      }
+    }
+
+    window.IDEEditor = IDEEditor;
     document.dispatchEvent(new Event('ide-editor-ready'));
-  }).catch((e) => {
+  }
+
+  build().catch((e) => {
     console.error('CodeMirror failed to load:', e);
     const mount = document.getElementById('editor');
     if (mount) {
