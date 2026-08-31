@@ -42,6 +42,35 @@ components can load from CDNs; afterwards much of it is cached.
 > `py/tkinter_shim.py` (the Python source of truth) via `node tools/gen_shim.js`,
 > so the browser can run with no local `fetch` (which `file://` blocks).
 
+## Hosting on GitHub Pages
+
+The site is fully static and subpath-safe (all local assets use relative paths),
+so it works both at a user-domain root and under a project URL like
+`https://<username>.github.io/Py-IDE/`.
+
+**Option A — deploy this branch directly (fastest):**
+
+1. Go to **Settings → Pages** on the GitHub repo.
+2. Under **Build and deployment → Source**, choose **Deploy from a branch**.
+3. **Branch:** select the branch you are working on (`arena/…` or `main`),
+   **folder:** `/ (root)`.
+4. Save. After ~1 minute the site is live at **https://&lt;username&gt;.github.io/Py-IDE/**
+   (shown in the Pages settings and on the repo's right sidebar).
+
+**Option B — merge to `main` then deploy from the root folder** — same settings
+as above with branch `main`.
+
+**Option C — GitHub Actions (auto-deploy on push):**
+the repo includes a ready-made workflow at
+`.github/workflows/deploy-pages.yml` that turns Pages on and deploys
+automatically. It needs to be pushed by someone with the `workflows` permission
+(your own push/PR merge), then either run it via **Actions → Deploy to GitHub
+Pages → Run workflow** or just push to `main`.
+
+`.nojekyll` is included so GitHub serves the files as-is (no Jekyll build step).
+The CDN libraries (Pyodide, CodeMirror, JSZip) load over HTTPS and work fine
+from a Pages subdomain.
+
 ## Project layout
 
 | File | Purpose |
