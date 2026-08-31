@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#17181d" />
+<title>Py-IDE — Online Python IDE</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='2' y='2' width='13' height='28' rx='6' fill='%233776AB'/%3E%3Crect x='17' y='2' width='13' height='28' rx='6' fill='%23FFD43B'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="css/styles.css" />
+<!-- JSZip for project export -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<!-- Pyodide: CPython compiled to WebAssembly -->
+<script src="https://cdn.jsdelivr.net/pyodide/v0.29.4/full/pyodide.js"></script>
+</head>
+<body>
+
+<!-- ===================== TOP BAR ===================== -->
+<header class="topbar">
+  <button id="explorerToggle" class="btn icon-btn" title="Toggle file explorer" aria-label="Toggle file explorer">
+    <span class="ic">☰</span>
+  </button>
+  <div class="brand">
+    <span class="brand-py">Py</span><span class="brand-ide">IDE</span>
+  </div>
+
+  <div class="top-actions">
+    <button id="runBtn" class="btn primary" title="Run (Ctrl/Cmd+Enter)">
+      <span class="ic">▶</span><span class="lbl">Run</span>
+    </button>
+    <button id="pkgBtn" class="btn" title="pip install packages">
+      <span class="ic">📦</span><span class="lbl">Pip</span>
+    </button>
+
+    <div class="dropdown">
+      <button id="importBtn" class="btn" title="Import files">
+        <span class="ic">⬆</span><span class="lbl">Import</span>
+      </button>
+      <div class="dropdown-menu" id="importMenu">
+        <button data-action="import-files">📄 Import files</button>
+        <button data-action="import-folder">📁 Import folder</button>
+      </div>
+    </div>
+
+    <div class="dropdown">
+      <button id="exportBtn" class="btn" title="Export project">
+        <span class="ic">⬇</span><span class="lbl">Export</span>
+      </button>
+      <div class="dropdown-menu" id="exportMenu">
+        <button data-action="export-zip">🗜 Export project (.zip)</button>
+        <button data-action="export-file">📄 Export current file</button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ===================== MAIN ===================== -->
+<div class="main">
+
+  <!-- File explorer -->
+  <aside class="explorer" id="explorer">
+    <div class="explorer-head">
+      <span class="explorer-title">Explorer</span>
+      <div class="explorer-actions">
+        <button id="newFileBtn" class="mini-btn" title="New file">📄+</button>
+        <button id="newFolderBtn" class="mini-btn" title="New folder">📁+</button>
+      </div>
+    </div>
+    <div class="tree" id="tree"></div>
+    <div class="explorer-foot">Files are saved in your browser</div>
+  </aside>
+  <div class="backdrop" id="backdrop"></div>
+
+  <!-- Editor + bottom panel -->
+  <section class="editor-wrap">
+    <div class="tabs" id="tabs"></div>
+    <div class="editor-mount" id="editor"></div>
+    <div class="keybar" id="keybar" aria-hidden="false">
+      <button data-ins=":" data-move="0">:</button>
+      <button data-ins="()" data-move="-1">( )</button>
+      <button data-ins="[]" data-move="-1">[ ]</button>
+      <button data-ins="{}" data-move="-1">{ }</button>
+      <button data-ins="''" data-move="-1">''</button>
+      <button data-ins='""' data-move="-1">""</button>
+      <button data-ins="=" data-move="0">=</button>
+      <button data-ins="." data-move="0">.</button>
+      <button data-ins=", " data-move="0">,</button>
+      <button data-ins="    " data-move="0" title="indent">⇥</button>
+      <button data-act="dedent" title="dedent">⇤</button>
+      <button class="kbd-run" data-act="run" title="Run">▶</button>
+    </div>
+
+    <div class="panel open" id="panel">
+      <div class="panel-head">
+        <div class="panel-tabs">
+          <button class="panel-tab active" data-tab="console">🖥 Console</button>
+          <button class="panel-tab" data-tab="gui">🪟 GUI Preview</button>
+        </div>
+        <div class="panel-actions">
+          <button id="clearConsoleBtn" class="mini-btn" title="Clear console">🧹</button>
+          <button id="panelToggle" class="mini-btn" title="Toggle panel">▾</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="pane active" id="consolePane">
+          <div id="console"></div>
+        </div>
+        <div class="pane" id="guiPane">
+          <div id="tk-desktop">
+            <div class="gui-hint" id="guiHint">
+              <div class="gui-hint-emoji">🪟</div>
+              Tkinter windows and matplotlib charts will appear here when you run your program.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- ===================== STATUS BAR ===================== -->
+<footer class="statusbar">
+  <span id="stPython" class="st-item">⏳ Python starting…</span>
+  <span class="st-sep">|</span>
+  <span id="stLang" class="st-item">—</span>
+  <span class="st-spacer"></span>
+  <span id="stPos" class="st-item">Ln 1, Col 1</span>
+</footer>
+
+<!-- ===================== PACKAGES MODAL ===================== -->
+<div class="modal hidden" id="pkgModal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2>📦 pip packages</h2>
+      <button class="mini-btn" id="pkgCloseBtn">✕</button>
+    </div>
+    <p class="modal-note">
+      Packages install into the browser via <b>micropip</b> (Pyodide/WASM).
+      Most pure-Python packages work (numpy, pandas, matplotlib, sympy, requests, openpyxl, Pillow…).
+      Tkinter is built in. Packages that need native binaries or raw sockets may not work.
+    </p>
+    <div class="pkg-install">
+      <input type="text" id="pkgInput" placeholder="package name, e.g. pandas" />
+      <button id="pkgInstallBtn" class="btn primary">Install</button>
+    </div>
+    <div class="chips" id="pkgChips"></div>
+    <h3 class="modal-sub">Installed</h3>
+    <ul class="pkg-list" id="pkgList"></ul>
+  </div>
+</div>
+
+<!-- hidden file inputs -->
+<input type="file" id="fileInput" multiple hidden />
+<input type="file" id="folderInput" webkitdirectory directory multiple hidden />
+
+<script src="js/files.js"></script>
+<script src="js/runner.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
