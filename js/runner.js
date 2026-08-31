@@ -285,10 +285,18 @@ async def ide_run(path):
         } catch (e) { /* will retry on demand */ }
       }
 
-      // tkinter browser shim
+      // tkinter browser shim (embedded so file:// works without fetch)
       hooks.status('Setting up Tkinter support…');
-      const shim = await fetch('py/tkinter_shim.py').then((r) => r.text());
-      await pyodide.runPythonAsync(shim);
+      let shim = window.__TKINTER_SHIM;
+      if (!shim) {
+        try {
+          shim = await fetch('py/tkinter_shim.py').then((r) => r.text());
+        } catch (e) {
+          shim = '';
+        }
+      }
+      if (shim) await pyodide.runPythonAsync(shim);
+      else hooks.out('Tkinter shim missing — tkinter disabled.', 'err');
 
       await pyodide.runPythonAsync(SETUP_PY);
 
